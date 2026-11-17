@@ -105,3 +105,4 @@ O navegador abrirá automaticamente em `http://localhost:8501`.
 3. **Pasta de Saída:** Informe a pasta onde o vídeo editado `.mp4` e o arquivo `editing_blueprint.json` serão salvos.
 4. **Proporção e Qualidade:** Escolha entre `9:16 (Reels/Shorts)`, `16:9 (YouTube)` ou `1:1 (Quadrado)` e o perfil de qualidade.
 5. Clique em **🚀 Iniciar Análise e Edição Automatizada** e acompanhe a barra de progresso e os logs em tempo real.
+# editor-ia

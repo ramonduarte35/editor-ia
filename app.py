@@ -1,9 +1,21 @@
+import importlib
 import json
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import List
 import streamlit as st
+
+import utils.config
+import core.reference_analyzer
+import core.footage_indexer
+import core.video_editor
+
+# Garante que atualizações nos módulos sejam recarregadas pelo servidor Streamlit sem precisar reiniciar o processo
+importlib.reload(utils.config)
+importlib.reload(core.reference_analyzer)
+importlib.reload(core.footage_indexer)
+importlib.reload(core.video_editor)
 
 from utils.config import (
     ASPECT_RATIOS,
@@ -69,6 +81,12 @@ with st.sidebar:
         "🎵 Usar áudio da referência se não houver música na pasta de entrada",
         value=True,
         help="Caso a pasta de entrada não tenha arquivos .mp3/.wav separados, usa a trilha rítmica da referência.",
+    )
+
+    reuse_footage_cache = st.checkbox(
+        "⚡ Reaproveitar leitura dos vídeos brutos (Cache)",
+        value=True,
+        help="Se os vídeos da pasta de entrada já foram lidos antes (ex: você editou um Short e agora quer gerar um vídeo longo), reaproveita a indexação instantaneamente.",
     )
 
     st.divider()
@@ -181,10 +199,15 @@ if start_btn:
             append_log(f"Blueprint de Edição salvo em: {blueprint_path}")
 
             # Módulo 3: Indexação dos Arquivos Brutos (OpenCV + Gemini Vision)
-            progress_bar.progress(65, text="Módulo 3/4: Analisando e pontuando os vídeos brutos com OpenCV e Gemini Vision...")
+            progress_bar.progress(65, text="Módulo 3/4: Carregando/analisando vídeos brutos (OpenCV + Gemini Vision)...")
             indexer = FootageIndexer(api_key=api_key, model_name=model_name, log_fn=append_log)
             avg_dur = float(blueprint.get("avg_shot_duration", 2.2))
-            indexed_segments = indexer.index_footage_folder(video_files, target_avg_duration=avg_dur, temp_dir=temp_dir)
+            indexed_segments = indexer.index_footage_folder(
+                video_files,
+                target_avg_duration=avg_dur,
+                temp_dir=temp_dir,
+                use_cache=reuse_footage_cache,
+            )
             st.session_state.indexed_segments = indexed_segments
 
             # Módulo 4: Montagem e Renderização (MoviePy + FFmpeg)

@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Any
@@ -36,26 +37,56 @@ class FootageIndexer:
         self.model_name = model_name
         self.log = log_fn or (lambda msg: None)
 
+    def _compute_folder_fingerprint(self, video_files: List[Path]) -> str:
+        """Gera uma assinatura única baseada nos arquivos de vídeo brutos (caminho, tamanho e mtime)."""
+        hasher = hashlib.sha256()
+        for vf in sorted(video_files, key=lambda p: str(p)):
+            stat = vf.stat()
+            hasher.update(f"{vf.name}:{stat.st_size}:{int(stat.st_mtime)}".encode("utf-8"))
+        return hasher.hexdigest()[:16]
+
     def index_footage_folder(
         self,
         video_files: List[Path],
         target_avg_duration: float = 2.5,
         temp_dir: Optional[Path] = None,
+        use_cache: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         Varre todos os vídeos de entrada, divide em janelas candidatas, mede nitidez/iluminação/estabilidade
         com OpenCV e classifica os melhores segmentos com Gemini Vision.
+        Se já houver cache válido na pasta de entrada, reaproveita a leitura instantaneamente.
         """
+        if not video_files:
+            raise ValueError("Lista de vídeos de entrada vazia.")
+
+        input_dir = video_files[0].parent
+        cache_dir = input_dir / ".ai_editor_cache"
+        fingerprint = self._compute_folder_fingerprint(video_files)
+        cache_file = cache_dir / f"footage_index_{fingerprint}.json"
+
+        if use_cache and cache_file.exists():
+            try:
+                cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                segments = cached_data.get("segments") or []
+                # Verifica se todos os arquivos referenciados no cache ainda existem
+                if segments and all(Path(s["source_path"]).exists() for s in segments):
+                    self.log(
+                        f"⚡ Cache encontrado! Reaproveitando leitura e notas de {len(segments)} trechos dos vídeos brutos "
+                        f"(sem precisar reprocessar no OpenCV/Gemini)."
+                    )
+                    return segments
+            except Exception as exc:
+                self.log(f"Aviso ao ler cache de vídeos brutos (reindexando): {exc}")
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
         all_candidates: List[Dict[str, Any]] = []
         window_sec = float(np.clip(target_avg_duration * 1.35, 1.5, 5.0))
 
         for vid_idx, video_path in enumerate(video_files):
             self.log(f"[{vid_idx + 1}/{len(video_files)}] Analisando arquivo bruto com OpenCV: {video_path.name}")
-            compatible_path = (
-                ensure_opencv_compatible_video(video_path, temp_dir, log_fn=self.log)
-                if temp_dir is not None
-                else video_path
-            )
+            # Salva eventuais conversões AV1 -> H.264 no cache_dir persistente para continuar válido entre execuções
+            compatible_path = ensure_opencv_compatible_video(video_path, cache_dir, log_fn=self.log)
             segments = self._scan_video_opencv(compatible_path, window_sec=window_sec, display_name=video_path.name)
             all_candidates.extend(segments)
 
@@ -64,7 +95,7 @@ class FootageIndexer:
 
         # Ordena preliminarmente pela pontuação técnica do OpenCV e seleciona os melhores candidatos para o Gemini Vision
         all_candidates.sort(key=lambda x: x["technical_score"], reverse=True)
-        top_candidates = all_candidates[:18]
+        top_candidates = all_candidates[:24]
 
         self.log(f"Avaliando semanticamente os {len(top_candidates)} melhores trechos com Gemini Vision ({self.model_name})...")
         enriched_candidates = self._evaluate_with_gemini_vision(top_candidates)
@@ -73,9 +104,26 @@ class FootageIndexer:
         for item in enriched_candidates:
             item["final_score"] = round(0.4 * item["technical_score"] + 0.6 * item.get("visual_interest_score", 7.0), 2)
 
-        enriched_candidates.sort(key=lambda x: x["final_score"], reverse=True)
-        self.log(f"Indexação concluída: {len(enriched_candidates)} trechos catalogados e ranqueados.")
-        return enriched_candidates
+        # Mantém também os demais candidatos avaliados tecnicamente (útil para vídeos longos com muitos cortes)
+        remaining_candidates = all_candidates[24:]
+        for item in remaining_candidates:
+            item.pop("_thumbnail", None)
+            item["final_score"] = item["technical_score"]
+
+        full_catalog = enriched_candidates + remaining_candidates
+        full_catalog.sort(key=lambda x: x["final_score"], reverse=True)
+
+        try:
+            cache_file.write_text(
+                json.dumps({"fingerprint": fingerprint, "segments": full_catalog}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.log(f"💾 Leitura dos vídeos brutos salva em cache ({cache_file.name}) para reaproveitamento futuro.")
+        except Exception as exc:
+            self.log(f"Aviso: não foi possível salvar cache em disco: {exc}")
+
+        self.log(f"Indexação concluída: {len(full_catalog)} trechos catalogados e ranqueados.")
+        return full_catalog
 
     def _scan_video_opencv(self, video_path: Path, window_sec: float = 2.5, display_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """

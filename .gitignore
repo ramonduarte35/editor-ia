@@ -10,6 +10,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.ssh/
 
 # Arquivos temporários e de mídia gerados
 *.mp4

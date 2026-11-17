@@ -1,0 +1,33 @@
+# Ambientes virtuais e cache do Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Variáveis de ambiente e segredos
+.env
+.env.*
+!.env.example
+
+# Arquivos temporários e de mídia gerados
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.mp3
+*.wav
+*.srt
+*.vtt
+temp/
+tmp/
+output/
+downloads/
+
+# IDEs e agentes
+.vscode/
+.idea/
+.DS_Store
+.agents/
+.claude/

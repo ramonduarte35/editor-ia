@@ -184,7 +184,7 @@ if start_btn:
             progress_bar.progress(65, text="Módulo 3/4: Analisando e pontuando os vídeos brutos com OpenCV e Gemini Vision...")
             indexer = FootageIndexer(api_key=api_key, model_name=model_name, log_fn=append_log)
             avg_dur = float(blueprint.get("avg_shot_duration", 2.2))
-            indexed_segments = indexer.index_footage_folder(video_files, target_avg_duration=avg_dur)
+            indexed_segments = indexer.index_footage_folder(video_files, target_avg_duration=avg_dur, temp_dir=temp_dir)
             st.session_state.indexed_segments = indexed_segments
 
             # Módulo 4: Montagem e Renderização (MoviePy + FFmpeg)

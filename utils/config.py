@@ -1,9 +1,14 @@
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional, Callable
+import cv2
 from dotenv import load_dotenv
+
+# Desativa aceleração de hardware VAAPI/VDPAU quebrada para AV1 no OpenCV embutido
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "hwaccel;none")
 
 load_dotenv()
 
@@ -110,3 +115,58 @@ class TempWorkspace:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.temp_dir and self.temp_dir.exists():
             shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+
+def ensure_opencv_compatible_video(
+    video_path: Path,
+    temp_dir: Path,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Path:
+    """
+    Testa se o OpenCV consegue decodificar frames reais do vídeo.
+    Caso o vídeo use codec AV1 (av01) ou outro formato que falhe no decoder embutido do OpenCV,
+    transcodifica automaticamente para H.264 (libx264) via FFmpeg do sistema.
+    """
+    log = log_fn or (lambda msg: None)
+    cap = cv2.VideoCapture(str(video_path))
+    can_read_frame = False
+
+    if cap.isOpened():
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.size > 0:
+            can_read_frame = True
+    cap.release()
+
+    if can_read_frame:
+        return video_path
+
+    log(f"Codec incompatível com OpenCV detectado em '{video_path.name}' (ex: AV1). Convertendo para H.264 com FFmpeg...")
+    converted_path = temp_dir / f"h264_{video_path.stem}.mp4"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "22",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        str(converted_path),
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0 or not converted_path.exists():
+        raise RuntimeError(
+            f"Falha ao converter vídeo '{video_path.name}' para H.264 com FFmpeg: {res.stderr[-300:] if res.stderr else 'erro desconhecido'}"
+        )
+
+    log(f"Conversão H.264 concluída: {converted_path.name}")
+    return converted_path
+

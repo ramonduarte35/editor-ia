@@ -12,6 +12,7 @@ from scenedetect.detectors import ContentDetector
 import yt_dlp
 from google import genai
 from google.genai import types
+from utils.config import ensure_opencv_compatible_video
 
 
 class CutSlot(BaseModel):
@@ -76,13 +77,20 @@ class ReferenceAnalyzer:
         candidate_local = Path(url_or_path).expanduser()
         if candidate_local.exists() and candidate_local.is_file():
             self.log(f"Usando arquivo local de referência: {candidate_local.name}")
-            return candidate_local
+            return ensure_opencv_compatible_video(candidate_local, temp_dir, log_fn=self.log)
 
         self.log(f"Iniciando download do vídeo de referência via yt-dlp: {url_or_path}")
         output_template = str(temp_dir / "reference_video.%(ext)s")
 
+        # Prioriza codec H.264 (avc1) e evita AV1 (av01) para compatibilidade total com OpenCV e PySceneDetect
         ydl_opts = {
-            "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+            "format": (
+                "bestvideo[height<=1080][vcodec^=avc]+bestaudio[ext=m4a]/"
+                "bestvideo[height<=1080][vcodec!^=av01][ext=mp4]+bestaudio[ext=m4a]/"
+                "best[height<=1080][vcodec^=avc]/"
+                "best[height<=1080][ext=mp4]/best"
+            ),
+            "format_sort": ["vcodec:h264", "res:1080", "ext:mp4:m4a"],
             "outtmpl": output_template,
             "merge_output_format": "mp4",
             "noplaylist": True,
@@ -104,7 +112,7 @@ class ReferenceAnalyzer:
 
         video_path = downloaded_files[0]
         self.log(f"Download concluído: {video_path.name} ({video_path.stat().st_size / (1024 * 1024):.1f} MB)")
-        return video_path
+        return ensure_opencv_compatible_video(video_path, temp_dir, log_fn=self.log)
 
     def extract_objective_metrics(self, video_path: Path, temp_dir: Path) -> Dict[str, Any]:
         """

@@ -7,6 +7,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from utils.config import ensure_opencv_compatible_video
 
 
 class SegmentEvaluation(BaseModel):
@@ -35,7 +36,12 @@ class FootageIndexer:
         self.model_name = model_name
         self.log = log_fn or (lambda msg: None)
 
-    def index_footage_folder(self, video_files: List[Path], target_avg_duration: float = 2.5) -> List[Dict[str, Any]]:
+    def index_footage_folder(
+        self,
+        video_files: List[Path],
+        target_avg_duration: float = 2.5,
+        temp_dir: Optional[Path] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Varre todos os vídeos de entrada, divide em janelas candidatas, mede nitidez/iluminação/estabilidade
         com OpenCV e classifica os melhores segmentos com Gemini Vision.
@@ -45,7 +51,12 @@ class FootageIndexer:
 
         for vid_idx, video_path in enumerate(video_files):
             self.log(f"[{vid_idx + 1}/{len(video_files)}] Analisando arquivo bruto com OpenCV: {video_path.name}")
-            segments = self._scan_video_opencv(video_path, window_sec=window_sec)
+            compatible_path = (
+                ensure_opencv_compatible_video(video_path, temp_dir, log_fn=self.log)
+                if temp_dir is not None
+                else video_path
+            )
+            segments = self._scan_video_opencv(compatible_path, window_sec=window_sec, display_name=video_path.name)
             all_candidates.extend(segments)
 
         if not all_candidates:
@@ -66,7 +77,7 @@ class FootageIndexer:
         self.log(f"Indexação concluída: {len(enriched_candidates)} trechos catalogados e ranqueados.")
         return enriched_candidates
 
-    def _scan_video_opencv(self, video_path: Path, window_sec: float = 2.5) -> List[Dict[str, Any]]:
+    def _scan_video_opencv(self, video_path: Path, window_sec: float = 2.5, display_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Divide um vídeo em segmentos e calcula:
         - Nitidez (variância do Laplaciano)
@@ -74,9 +85,10 @@ class FootageIndexer:
         - Movimento / Estabilidade (diferença entre frames adjacentes: penaliza tremores extremos ou imagem congelada)
         - Centro de gravidade da ação (coordenada X normalizada para Smart Crop)
         """
+        shown_name = display_name or video_path.name
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
-            self.log(f"Aviso: Não foi possível abrir {video_path.name}, ignorando.")
+            self.log(f"Aviso: Não foi possível abrir {shown_name}, ignorando.")
             return []
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -165,12 +177,12 @@ class FootageIndexer:
                 tech_score = round(0.40 * sharp_score + 0.30 * luma_score + 0.30 * stability_score, 2)
                 energy_est = "high" if avg_motion >= 11.0 else ("medium" if avg_motion >= 4.0 else "low")
 
-                seg_id = f"{video_path.stem}_seg{seg_counter:02d}"
+                seg_id = f"{Path(shown_name).stem}_seg{seg_counter:02d}"
                 segments.append(
                     {
                         "segment_id": seg_id,
                         "source_path": str(video_path),
-                        "file_name": video_path.name,
+                        "file_name": shown_name,
                         "start_sec": round(cur_start, 2),
                         "end_sec": round(cur_end, 2),
                         "duration_sec": round(cur_end - cur_start, 2),
@@ -185,7 +197,7 @@ class FootageIndexer:
                         "recommended_role": "buildup",
                         "visual_interest_score": tech_score,
                         "caption_suggestion": "",
-                        "description": f"Trecho de {video_path.name} ({cur_start:.1f}s-{cur_end:.1f}s)",
+                        "description": f"Trecho de {shown_name} ({cur_start:.1f}s-{cur_end:.1f}s)",
                         "_thumbnail": mid_pil_image,
                     }
                 )

@@ -130,10 +130,17 @@ class AudioSpeechCleaner:
         """
         Envia o áudio para o Gemini para identificar erros de fala, repetições,
         gagueiras, espirros ou falsas partidas com os timestamps exatos a remover.
+        Conta com retry automático e fallback para modelos alternativos caso o Google reporte 503 (alta demanda).
         """
         if not self.client:
             return SpeechAnalysisResult(has_speech=True, transcription_summary="API Key não fornecida", cuts_to_remove=[])
 
+        candidate_models = [self.model_name]
+        for fallback in ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite"]:
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
+
+        uploaded_file = None
         try:
             self.log(f"Enviando áudio de '{audio_path.name}' para Gemini auditar erros de fala...")
             uploaded_file = self.client.files.upload(file=str(audio_path))
@@ -150,27 +157,45 @@ class AudioSpeechCleaner:
                 "Se a fala estiver fluida e sem erros, deixe `cuts_to_remove` vazio."
             )
 
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[uploaded_file, prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=SpeechAnalysisResult,
-                    temperature=0.1,
-                ),
-            )
+            last_error = None
+            for model_to_try in candidate_models:
+                for attempt in range(2):
+                    try:
+                        if model_to_try != self.model_name:
+                            self.log(f"Tentando modelo alternativo ({model_to_try})...")
 
-            # Limpeza do arquivo no Google AI Studio
-            try:
-                self.client.files.delete(name=uploaded_file.name)
-            except Exception:
-                pass
+                        response = self.client.models.generate_content(
+                            model=model_to_try,
+                            contents=[uploaded_file, prompt],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=SpeechAnalysisResult,
+                                temperature=0.1,
+                            ),
+                        )
+                        result = json.loads(response.text)
+                        return SpeechAnalysisResult(**result)
+                    except Exception as err:
+                        last_error = err
+                        err_str = str(err)
+                        if "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str:
+                            import time
+                            time.sleep(2.0)
+                            continue
+                        else:
+                            break
 
-            result = json.loads(response.text)
-            return SpeechAnalysisResult(**result)
+            raise last_error or RuntimeError("Todos os modelos falharam na análise de fala.")
+
         except Exception as exc:
-            self.log(f"Aviso na análise de erros com Gemini ({exc}). Prosseguindo sem cortes de fala.")
+            self.log(f"Aviso na análise de erros com Gemini ({exc}). Prosseguindo com os cortes de silêncio.")
             return SpeechAnalysisResult(has_speech=True, transcription_summary="Falha na análise", cuts_to_remove=[])
+        finally:
+            if uploaded_file and self.client:
+                try:
+                    self.client.files.delete(name=uploaded_file.name)
+                except Exception:
+                    pass
 
     def subtract_intervals(
         self,

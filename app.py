@@ -95,9 +95,9 @@ with st.sidebar:
     st.subheader("🎙️ Limpeza Inteligente de Fala")
     speech_engine = st.radio(
         "Motor de Análise de Fala",
-        options=["🖥️ Local (Faster-Whisper - Offline e Leve)", "☁️ Nuvem (Google Gemini API)"],
+        options=["☁️ Nuvem (Google Gemini IA - Ideal para Motovlog)", "🖥️ Local (Faster-Whisper - Offline)"],
         index=0,
-        help="Local: Roda no seu computador sem enviar áudio para a internet. Nuvem: Envia para a API do Google.",
+        help="Nuvem (Gemini): Ouve e entende contexto semântico, ignorando motor de moto e vento com facilidade. Local: Roda offline na CPU/GPU.",
     )
 
     whisper_size = "tiny"
@@ -110,9 +110,9 @@ with st.sidebar:
         ).split()[0]
 
     motovlog_mode = st.checkbox(
-        "🏍️ Otimizar para Motovlog (Isolar Voz do Motor/Vento)",
+        "🏍️ Modo Motovlog (Isolar Voz e Ignorar Motor/Vento)",
         value=True,
-        help="Aplica filtro passa-faixa acústico (200Hz - 3.6kHz) para cortar o grave do motor e assobio do vento, além de aumentar a margem dos cortes para não engolir o início nem o fim das frases.",
+        help="A IA foca estritamente na voz do piloto dentro do capacete e descarta os momentos de silêncio onde só há escapamento/vento.",
     )
 
     remove_silence = st.checkbox(
@@ -347,8 +347,18 @@ if start_btn:
                     except Exception:
                         v_duration = 60.0
 
-                    # 1. Cortar silêncio (usando margens de segurança ampliadas para motovlog)
-                    if remove_silence:
+                    # 1. Detecção de Voz Inteligente (IA Gemini vs Decibéis)
+                    is_gemini_ai = "Gemini" in speech_engine
+
+                    if is_gemini_ai:
+                        append_log(f"  🧠 Analisando fala com IA Multimodal do Gemini (separando voz do motor)...")
+                        intervals = speech_cleaner.detect_voice_intervals_with_gemini(
+                            temp_audio,
+                            total_duration=v_duration,
+                            padding_start=0.35,
+                            padding_end=0.45,
+                        )
+                    elif remove_silence:
                         pad_start = 0.28 if motovlog_mode else 0.12
                         pad_end = 0.38 if motovlog_mode else 0.18
                         db_thresh = -26.0 if motovlog_mode else -32.0
@@ -365,21 +375,15 @@ if start_btn:
                             padding_end=pad_end,
                             min_segment_dur=0.5,
                         )
-                        append_log(f"  -> {len(silences)} pausas detectadas. {len(intervals)} trechos de fala isolados (com margem de fala +{pad_start}s/+{pad_end}s).")
+                        append_log(f"  -> {len(silences)} pausas detectadas. {len(intervals)} trechos de fala isolados.")
                     else:
                         intervals = [(0.0, v_duration)]
 
-                    # 2. Auditar erros, repetições e gagueiras (Local Faster-Whisper ou Gemini)
-                    if clean_speech_mistakes and temp_audio.exists():
-                        is_local = "Local" in speech_engine
-                        if is_local:
-                            speech_res = speech_cleaner.analyze_speech_mistakes_local(temp_audio)
-                        else:
-                            speech_res = speech_cleaner.analyze_speech_mistakes_with_gemini(temp_audio)
-
+                    # 2. Auditar erros e repetições se estiver no modo local (o Gemini já faz isso na detecção)
+                    if clean_speech_mistakes and not is_gemini_ai and temp_audio.exists():
+                        speech_res = speech_cleaner.analyze_speech_mistakes_local(temp_audio)
                         if speech_res.cuts_to_remove:
-                            engine_label = "Faster-Whisper Local" if is_local else "Gemini"
-                            append_log(f"  -> {engine_label} identificou {len(speech_res.cuts_to_remove)} imperfeições para remover:")
+                            append_log(f"  -> Faster-Whisper identificou {len(speech_res.cuts_to_remove)} imperfeições para remover:")
                             rem_list = []
                             for err in speech_res.cuts_to_remove:
                                 append_log(f"     ✂️ [{err.error_type}] {err.start_sec}s-{err.end_sec}s: {err.reason}")

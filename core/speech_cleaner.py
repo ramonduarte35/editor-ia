@@ -34,12 +34,32 @@ class SpeechCorrection(BaseModel):
     reason: str = Field(description="Explicação rápida do motivo do descarte (ex: repetiu a frase, gaguejou, espirrou)")
 
 
+class VoiceSegmentAI(BaseModel):
+    start_sec: float = Field(description="Timestamp exato onde o piloto começou a falar em segundos")
+    end_sec: float = Field(description="Timestamp exato onde o piloto terminou de falar em segundos")
+    spoken_text: str = Field(description="O que foi dito nesse trecho")
+    is_valid_take: bool = Field(description="True se o take for bom; False se for gagueira ou erro para descartar", default=True)
+
+
+class GeminiSpeechDetectionResult(BaseModel):
+    has_speech: bool = Field(description="True se o piloto fala algo inteligível no vídeo")
+    summary: str = Field(description="Resumo geral do que o piloto falou no vídeo")
+    voice_segments: List[VoiceSegmentAI] = Field(
+        default_factory=list,
+        description="Lista de todos os trechos onde há voz humana ativa do piloto falando",
+    )
+
+
 class SpeechAnalysisResult(BaseModel):
     has_speech: bool = Field(description="Se há voz humana identificável no áudio")
     transcription_summary: str = Field(description="Resumo do conteúdo falado")
     cuts_to_remove: List[SpeechCorrection] = Field(
         default_factory=list,
         description="Lista de trechos com gagueiras, repetições de frases ou ruídos para remover da edição final"
+    )
+    voice_intervals: List[Tuple[float, float]] = Field(
+        default_factory=list,
+        description="Intervalos de fala aprovados",
     )
 
 
@@ -303,6 +323,97 @@ class AudioSpeechCleaner:
                     merged.append((start, end))
 
         return merged
+
+    def detect_voice_intervals_with_gemini(
+        self,
+        audio_path: Path,
+        total_duration: float,
+        padding_start: float = 0.35,
+        padding_end: float = 0.45,
+    ) -> List[Tuple[float, float]]:
+        """
+        Usa o raciocínio acústico da IA multimodal do Gemini para diferenciar voz humana
+        do ruído de motor de moto e vento, identificando exatamente os trechos onde há fala.
+        """
+        if not self.client:
+            return [(0.0, total_duration)]
+
+        uploaded_file = None
+        candidate_models = [self.model_name]
+        for fallback in ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite"]:
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
+
+        try:
+            self.log(f"🧠 Enviando áudio para IA do Gemini identificar trechos onde você fala (ignorando moto/vento)...")
+            uploaded_file = self.client.files.upload(file=str(audio_path))
+
+            prompt = (
+                "Você é um editor de áudio especializado em Motovlog.\n"
+                "Neste áudio há muito barulho constante de motor de moto, escapamento e vento.\n"
+                "Sua missão é ignorar completamente o som da moto/vento e identificar com precisão temporal os momentos em que o PILOTO ESTÁ FALANDO.\n"
+                "Para cada trecho onde o piloto fala, informe:\n"
+                "- start_sec: segundo exato onde começa a fala\n"
+                "- end_sec: segundo exato onde termina a fala\n"
+                "- spoken_text: o que ele disse\n"
+                "- is_valid_take: false se foi uma gagueira severa ou recomeço de frase, true se for fala válida.\n"
+                "Se não houver voz humana falada em nenhum momento, retorne has_speech = false e lista vazia."
+            )
+
+            last_error = None
+            for model_to_try in candidate_models:
+                for attempt in range(2):
+                    try:
+                        response = self.client.models.generate_content(
+                            model=model_to_try,
+                            contents=[uploaded_file, prompt],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=GeminiSpeechDetectionResult,
+                                temperature=0.1,
+                            ),
+                        )
+                        result = json.loads(response.text)
+                        segments = result.get("voice_segments") or []
+                        raw_intervals: List[Tuple[float, float]] = []
+
+                        for seg in segments:
+                            if seg.get("is_valid_take", True):
+                                s_start = max(0.0, float(seg["start_sec"]) - padding_start)
+                                s_end = min(total_duration, float(seg["end_sec"]) + padding_end)
+                                if s_end - s_start >= 0.5:
+                                    raw_intervals.append((round(s_start, 2), round(s_end, 2)))
+
+                        # Mescla sobreposições
+                        merged: List[Tuple[float, float]] = []
+                        for start, end in sorted(raw_intervals, key=lambda x: x[0]):
+                            if not merged:
+                                merged.append((start, end))
+                            else:
+                                prev_start, prev_end = merged[-1]
+                                if start <= prev_end + 0.2:
+                                    merged[-1] = (prev_start, max(prev_end, end))
+                                else:
+                                    merged.append((start, end))
+
+                        self.log(f"🧠 IA do Gemini localizou {len(merged)} bloco(s) reais de fala no áudio do motovlog!")
+                        return merged if merged else [(0.0, total_duration)]
+                    except Exception as err:
+                        last_error = err
+                        import time
+                        time.sleep(2.0)
+                        continue
+
+            raise last_error or RuntimeError("Falha na chamada Gemini")
+        except Exception as exc:
+            self.log(f"Aviso no Gemini Speech Detection ({exc}). Mantendo áudio completo.")
+            return [(0.0, total_duration)]
+        finally:
+            if uploaded_file and self.client:
+                try:
+                    self.client.files.delete(name=uploaded_file.name)
+                except Exception:
+                    pass
 
     def analyze_speech_mistakes_with_gemini(
         self,

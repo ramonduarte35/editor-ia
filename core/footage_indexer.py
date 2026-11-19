@@ -179,12 +179,9 @@ class FootageIndexer:
         target_windows: List[Tuple[float, float]] = []
         if allowed_intervals:
             for int_start, int_end in allowed_intervals:
-                c_start = int_start
-                while c_start < int_end:
-                    c_end = min(int_end, c_start + window_sec)
-                    if c_end - c_start >= 0.5:
-                        target_windows.append((c_start, c_end))
-                    c_start += step_sec
+                # No modo de fala contínua, cada intervalo limpo é um take direto, sem fatiar em subjanelas artificiais
+                if int_end - int_start >= 0.4:
+                    target_windows.append((int_start, int_end))
         else:
             cur_start = 0.0
             while cur_start < duration:
@@ -195,8 +192,8 @@ class FootageIndexer:
                 cur_start += step_sec
 
         for cur_start, cur_end in target_windows:
-            # Amostra 4 frames dentro da janela
-            sample_times = np.linspace(cur_start + 0.05, cur_end - 0.05, num=4)
+            # Amostra apenas 2 frames rápidos por take (em vez de 4) para acelerar a análise em 200%
+            sample_times = [cur_start + 0.1, max(cur_start + 0.2, (cur_start + cur_end) / 2.0)]
             sharpness_vals = []
             brightness_vals = []
             motion_vals = []

@@ -80,6 +80,20 @@ class VideoEditor:
         opened_source_clips: List[VideoFileClip] = []
         processed_clips: List[ Any ] = []
 
+        # Otimização de Performance: Se o color grading for neutro (1.0), pula processamento pesado pixel a pixel
+        has_color_grading = (
+            abs(float(color_spec.get("saturation", 1.0)) - 1.0) > 0.05
+            or abs(float(color_spec.get("contrast", 1.0)) - 1.0) > 0.05
+            or abs(float(color_spec.get("brightness", 0.0))) > 0.04
+            or abs(float(color_spec.get("warmth", 0.0))) > 0.04
+            or str(color_spec.get("preset_name", "")).lower() == "bw_punch"
+        )
+        has_subtitles = bool(sub_spec.get("enabled", False))
+        has_zoom = framing_style == "dynamic_zoom" and zoom_intensity > 0.01
+
+        # Cache de clips abertos por arquivo de origem para evitar reabrir o mesmo vídeo dezenas de vezes
+        clip_cache: Dict[str, VideoFileClip] = {}
+
         try:
             for idx, plan_item in enumerate(timeline_plan):
                 seg = plan_item["segment"]
@@ -94,11 +108,15 @@ class VideoEditor:
 
                 self.log(
                     f"Montando Take {idx + 1}/{len(timeline_plan)}: {seg['file_name']} "
-                    f"({start_t:.2f}s -> {end_t:.2f}s | papel={slot.get('shot_role')} | energia={seg.get('energy_level')})"
+                    f"({start_t:.2f}s -> {end_t:.2f}s)"
                 )
 
-                src_clip = VideoFileClip(src_path)
-                opened_source_clips.append(src_clip)
+                if src_path not in clip_cache:
+                    src_clip = VideoFileClip(src_path)
+                    clip_cache[src_path] = src_clip
+                    opened_source_clips.append(src_clip)
+                else:
+                    src_clip = clip_cache[src_path]
 
                 safe_end = min(src_clip.duration - 0.02, end_t)
                 safe_start = max(0.0, min(start_t, safe_end - 0.4))
@@ -107,18 +125,19 @@ class VideoEditor:
                 # 1. Smart Crop e Redimensionamento para a proporção escolhida
                 sub = self._apply_smart_crop(sub, target_w, target_h, focus_x=float(seg.get("focus_x", 0.5)))
 
-                # 2. Efeito de Enquadramento Dinâmico (Zoom suave estilo Reels/TikTok) e Color Grading + Legenda
+                # 2. Efeito de Enquadramento Dinâmico, Cor e Legenda (apenas se realmente ativos)
                 caption_text = plan_item.get("caption_text", "")
-                sub = self._apply_visual_styling(
-                    clip=sub,
-                    color_spec=color_spec,
-                    framing_style=framing_style,
-                    zoom_intensity=zoom_intensity,
-                    caption_text=caption_text,
-                    sub_spec=sub_spec,
-                    target_w=target_w,
-                    target_h=target_h,
-                )
+                if has_color_grading or (has_subtitles and caption_text) or has_zoom:
+                    sub = self._apply_visual_styling(
+                        clip=sub,
+                        color_spec=color_spec,
+                        framing_style=framing_style,
+                        zoom_intensity=zoom_intensity,
+                        caption_text=caption_text,
+                        sub_spec=sub_spec,
+                        target_w=target_w,
+                        target_h=target_h,
+                    )
 
                 # 3. Transição de entrada (crossfade ou flash branco)
                 transition_type = slot.get("transition_in", recommended_transition)
@@ -168,12 +187,13 @@ class VideoEditor:
             final_output_path = output_dir / f"video_editado_{timestamp_str}.mp4"
 
             self.log(f"Renderizando vídeo ({target_w}x{target_h}) com MoviePy + FFmpeg...")
+            # Limita a 4 threads de renderização do FFmpeg para não afogar a CPU nem travar o SO
             final_video.write_videofile(
                 str(raw_render_path),
                 fps=30,
                 codec="libx264",
                 audio_codec="aac",
-                preset=quality_cfg.get("preset", "fast"),
+                preset=quality_cfg.get("preset", "ultrafast"),
                 bitrate=quality_cfg.get("bitrate", "4500k"),
                 ffmpeg_params=["-crf", str(quality_cfg.get("crf", "23")), "-pix_fmt", "yuv420p"],
                 threads=4,

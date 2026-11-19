@@ -53,22 +53,27 @@ class VideoEditor:
         target_h = int(round(target_resolution[1] * scale / 2.0) * 2)
 
         cut_slots = blueprint.get("cut_slots") or []
-        # Se não houver cut_slots (modo sem vídeo de referência), cria slots sequenciais para todos os segmentos limpos
+        # Se não houver cut_slots (modo sem vídeo de referência / fala contínua)
         if not cut_slots:
-            cut_slots = [
+            timeline_plan = [
                 {
-                    "slot_index": i,
+                    "slot": {
+                        "slot_index": i,
+                        "duration_sec": float(seg["duration_sec"]),
+                        "shot_role": "speech",
+                        "energy_level": "medium",
+                        "transition_in": "hard_cut",
+                    },
+                    "segment": seg,
                     "duration_sec": float(seg["duration_sec"]),
-                    "shot_role": seg.get("recommended_role", "buildup"),
-                    "energy_level": seg.get("energy_level", "medium"),
-                    "transition_in": "hard_cut",
+                    "caption_text": "",
                 }
                 for i, seg in enumerate(indexed_segments)
             ]
-            self.log(f"Modo Fala Contínua: Montando timeline sequencial completa com todos os {len(cut_slots)} trechos limpos.")
+            self.log(f"Modo Fala Contínua: Montando {len(timeline_plan)} trechos de fala na sequência temporal exata.")
         else:
             self.log(f"Pareando {len(cut_slots)} cortes do Blueprint com os melhores takes brutos...")
-        timeline_plan = self._match_segments_to_slots(cut_slots, indexed_segments, blueprint)
+            timeline_plan = self._match_segments_to_slots(cut_slots, indexed_segments, blueprint)
 
         color_spec = blueprint.get("color_grading") or {}
         sub_spec = blueprint.get("subtitle_style") or {}

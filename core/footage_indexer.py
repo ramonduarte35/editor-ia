@@ -108,7 +108,15 @@ class FootageIndexer:
         if not all_candidates:
             raise RuntimeError("Nenhum trecho válido pôde ser extraído dos vídeos de entrada.")
 
-        # Ordena preliminarmente pela pontuação técnica do OpenCV e seleciona os melhores candidatos para o Gemini Vision
+        # Se o usuário está editando fala/motovlog com intervalos válidos, preserva a ordem cronológica estrita
+        if valid_intervals_map:
+            for cand in all_candidates:
+                cand.pop("_thumbnail", None)
+                cand["final_score"] = cand["technical_score"]
+            self.log(f"Modo Fala Contínua: Preservando {len(all_candidates)} trechos de fala na ordem cronológica exata.")
+            return all_candidates
+
+        # Caso contrário (modo clipes/highlights de música), ranqueia pelas melhores cenas
         all_candidates.sort(key=lambda x: x["technical_score"], reverse=True)
         top_candidates = all_candidates[:24]
 

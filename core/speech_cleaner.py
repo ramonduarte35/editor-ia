@@ -396,8 +396,16 @@ class AudioSpeechCleaner:
                                 else:
                                     merged.append((start, end))
 
-                        self.log(f"🧠 IA do Gemini localizou {len(merged)} bloco(s) reais de fala no áudio do motovlog!")
-                        return merged if merged else [(0.0, total_duration)]
+                        self.log(f"🧠 IA do Gemini localizou {len(segments)} trecho(s) de fala no motovlog.")
+                        for s in segments:
+                            status_icon = "✅" if s.get("is_valid_take", True) else "❌ (descartado)"
+                            self.log(f"   {status_icon} [{s.get('start_sec', 0):.1f}s - {s.get('end_sec', 0):.1f}s]: '{s.get('spoken_text', '')}'")
+
+                        if not raw_intervals:
+                            self.log("⚠️ Nenhuma fala clara detectada pelo Gemini. Mantendo o vídeo original sem cortes.")
+                            return [(0.0, total_duration)]
+
+                        return merged
                     except Exception as err:
                         last_error = err
                         import time

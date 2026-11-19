@@ -10,13 +10,16 @@ from google.genai import types
 # Compatibilidade entre PyAV >= 14/19 e faster-whisper (PyAV removeu o argumento metadata_errors em versões recentes)
 try:
     import av
-    _orig_av_open = av.open
+    # Proteção contra recursão infinita em recarregamentos do Streamlit (importlib.reload)
+    if not getattr(av, "_patched_for_faster_whisper", False):
+        _orig_av_open = av.open
 
-    def _safe_av_open(*args, **kwargs):
-        kwargs.pop("metadata_errors", None)
-        return _orig_av_open(*args, **kwargs)
+        def _safe_av_open(*args, **kwargs):
+            kwargs.pop("metadata_errors", None)
+            return _orig_av_open(*args, **kwargs)
 
-    av.open = _safe_av_open
+        av.open = _safe_av_open
+        av._patched_for_faster_whisper = True
 except Exception:
     pass
 

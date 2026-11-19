@@ -109,6 +109,12 @@ with st.sidebar:
             help="'tiny' usa menos de 500MB de RAM e roda quase instantaneamente sem congelar a máquina.",
         ).split()[0]
 
+    motovlog_mode = st.checkbox(
+        "🏍️ Otimizar para Motovlog (Isolar Voz do Motor/Vento)",
+        value=True,
+        help="Aplica filtro passa-faixa acústico (200Hz - 3.6kHz) para cortar o grave do motor e assobio do vento, além de aumentar a margem dos cortes para não engolir o início nem o fim das frases.",
+    )
+
     remove_silence = st.checkbox(
         "✂️ Cortar silêncios e pausas longas (Jump Cut)",
         value=True,
@@ -318,13 +324,17 @@ if start_btn:
                 progress_bar.progress(45, text="Módulo 3: Cortando silêncios e auditando erros de fala nos brutos...")
                 for vid in video_files:
                     append_log(f"Processando áudio e fala de: {vid.name}")
-                    # Extrai áudio temporário em MP3 para análise
+                    # Extrai áudio temporário para análise com isolamento de voz se o modo motovlog estiver ativo
                     temp_audio = temp_dir / f"{vid.stem}_audio.mp3"
-                    subprocess.run(
-                        ["ffmpeg", "-y", "-i", str(vid), "-vn", "-ac", "1", "-ar", "24000", "-b:a", "96k", str(temp_audio)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    if motovlog_mode:
+                        append_log(f"  🏍️ Aplicando isolamento de voz (filtrando grave do motor e vento) em: {vid.name}")
+                        speech_cleaner.extract_voice_isolated_audio(vid, temp_audio)
+                    else:
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-i", str(vid), "-vn", "-ac", "1", "-ar", "24000", "-b:a", "96k", str(temp_audio)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
 
                     # Obtém duração total com ffprobe
                     dur_cmd = [
@@ -337,11 +347,25 @@ if start_btn:
                     except Exception:
                         v_duration = 60.0
 
-                    # 1. Cortar silêncio
+                    # 1. Cortar silêncio (usando margens de segurança ampliadas para motovlog)
                     if remove_silence:
-                        silences = speech_cleaner.detect_silence_intervals(vid, noise_threshold_db=-32.0, min_silence_duration=0.5)
-                        intervals = speech_cleaner.extract_clean_voice_intervals(v_duration, silences)
-                        append_log(f"  -> {len(silences)} silêncios removidos. {len(intervals)} trechos com som/fala identificados.")
+                        pad_start = 0.28 if motovlog_mode else 0.12
+                        pad_end = 0.38 if motovlog_mode else 0.18
+                        db_thresh = -26.0 if motovlog_mode else -32.0
+
+                        silences = speech_cleaner.detect_silence_intervals(
+                            temp_audio if motovlog_mode else vid,
+                            noise_threshold_db=db_thresh,
+                            min_silence_duration=0.6 if motovlog_mode else 0.5,
+                        )
+                        intervals = speech_cleaner.extract_clean_voice_intervals(
+                            v_duration,
+                            silences,
+                            padding_start=pad_start,
+                            padding_end=pad_end,
+                            min_segment_dur=0.5,
+                        )
+                        append_log(f"  -> {len(silences)} pausas detectadas. {len(intervals)} trechos de fala isolados (com margem de fala +{pad_start}s/+{pad_end}s).")
                     else:
                         intervals = [(0.0, v_duration)]
 

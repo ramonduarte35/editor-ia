@@ -186,22 +186,51 @@ class AudioSpeechCleaner:
             return SpeechAnalysisResult(has_speech=True, transcription_summary="Erro no Whisper", cuts_to_remove=[])
 
 
+    def extract_voice_isolated_audio(self, video_path: Path, output_audio: Path) -> Path:
+        """
+        Isola as frequências da voz humana e filtra o barulho do motor da moto e do vento:
+        - highpass=f=200: remove o grave profundo do motor e o ronco do escapamento (< 200 Hz)
+        - lowpass=f=3600: remove ruídos agudos de atrito e assobio de vento (> 3.6 kHz)
+        - afftdn=nr=18:nf=-30: aplica redução adaptativa de ruído de fundo constante (FFT Denoise)
+        - arnndn: filtro neural se disponível ou afftdn
+        """
+        filter_chain = "highpass=f=200,lowpass=f=3600,afftdn=nr=18:nf=-28,volume=2.0"
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-af",
+            filter_chain,
+            "-b:a",
+            "96k",
+            str(output_audio),
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return output_audio
+
     def detect_silence_intervals(
         self,
-        video_path: Path,
-        noise_threshold_db: float = -32.0,
-        min_silence_duration: float = 0.5,
+        audio_or_video_path: Path,
+        noise_threshold_db: float = -28.0,
+        min_silence_duration: float = 0.6,
     ) -> List[Tuple[float, float]]:
         """
-        Executa silencedetect do FFmpeg para encontrar todos os intervalos de silêncio no vídeo.
+        Executa silencedetect do FFmpeg no áudio com filtro passa-faixa de voz.
         Retorna uma lista de tuplas [(start, end), ...] com os intervalos de silêncio.
         """
+        filter_str = f"highpass=f=200,lowpass=f=3500,silencedetect=noise={noise_threshold_db}dB:d={min_silence_duration}"
         cmd = [
             "ffmpeg",
             "-i",
-            str(video_path),
+            str(audio_or_video_path),
             "-af",
-            f"silencedetect=noise={noise_threshold_db}dB:d={min_silence_duration}",
+            filter_str,
             "-f",
             "null",
             "-",
@@ -230,12 +259,15 @@ class AudioSpeechCleaner:
         self,
         total_duration: float,
         silence_intervals: List[Tuple[float, float]],
-        padding_sec: float = 0.08,
-        min_segment_dur: float = 0.4,
+        padding_start: float = 0.25,
+        padding_end: float = 0.35,
+        min_segment_dur: float = 0.5,
     ) -> List[Tuple[float, float]]:
         """
-        Inverte os intervalos de silêncio para obter apenas os intervalos onde há fala/som ativo,
-        adicionando uma pequena margem (padding) para não cortar respirações naturais ou consoantes.
+        Inverte os intervalos de silêncio para obter apenas os intervalos onde há fala.
+        Aplica margem generosa (padding de segurança):
+        - padding_start: 0.25s antes da primeira palavra (evita comer o início da frase/respiração)
+        - padding_end: 0.35s após a última palavra (evita comer a última sílaba da fala)
         """
         if not silence_intervals:
             return [(0.0, round(total_duration, 2))]
@@ -245,19 +277,32 @@ class AudioSpeechCleaner:
 
         for s_start, s_end in sorted(silence_intervals):
             # Intervalo sonoro antes do início do silêncio
-            seg_start = cur_pos
-            seg_end = min(total_duration, s_start + padding_sec)
+            seg_start = max(0.0, cur_pos - padding_start) if cur_pos > 0 else 0.0
+            seg_end = min(total_duration, s_start + padding_end)
 
             if seg_end - seg_start >= min_segment_dur:
                 voice_intervals.append((round(seg_start, 2), round(seg_end, 2)))
 
-            cur_pos = max(0.0, s_end - padding_sec)
+            cur_pos = max(0.0, s_end - padding_start)
 
         # Trecho final após o último silêncio
         if total_duration - cur_pos >= min_segment_dur:
-            voice_intervals.append((round(cur_pos, 2), round(total_duration, 2)))
+            seg_start = max(0.0, cur_pos - padding_start)
+            voice_intervals.append((round(seg_start, 2), round(total_duration, 2)))
 
-        return voice_intervals
+        # Funde intervalos com sobreposição gerada pelas margens (merge overlapping)
+        merged: List[Tuple[float, float]] = []
+        for start, end in sorted(voice_intervals, key=lambda x: x[0]):
+            if not merged:
+                merged.append((start, end))
+            else:
+                prev_start, prev_end = merged[-1]
+                if start <= prev_end + 0.15:
+                    merged[-1] = (prev_start, max(prev_end, end))
+                else:
+                    merged.append((start, end))
+
+        return merged
 
     def analyze_speech_mistakes_with_gemini(
         self,

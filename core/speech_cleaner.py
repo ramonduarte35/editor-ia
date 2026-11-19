@@ -10,16 +10,13 @@ from google.genai import types
 # Compatibilidade entre PyAV >= 14/19 e faster-whisper (PyAV removeu o argumento metadata_errors em versões recentes)
 try:
     import av
-    # Proteção contra recursão infinita em recarregamentos do Streamlit (importlib.reload)
-    if not getattr(av, "_patched_for_faster_whisper", False):
-        _orig_av_open = av.open
+    _orig_av_open = av.open
 
-        def _safe_av_open(*args, **kwargs):
-            kwargs.pop("metadata_errors", None)
-            return _orig_av_open(*args, **kwargs)
+    def _safe_av_open(*args, **kwargs):
+        kwargs.pop("metadata_errors", None)
+        return _orig_av_open(*args, **kwargs)
 
-        av.open = _safe_av_open
-        av._patched_for_faster_whisper = True
+    av.open = _safe_av_open
 except Exception:
     pass
 
@@ -60,7 +57,7 @@ class AudioSpeechCleaner:
         api_key: Optional[str] = None,
         model_name: str = "gemini-3.8-flash",
         log_fn: Optional[Callable[[str], None]] = None,
-        whisper_model_size: str = "base",
+        whisper_model_size: str = "tiny",
     ):
         self.api_key = api_key
         self.model_name = model_name
@@ -70,18 +67,31 @@ class AudioSpeechCleaner:
         self._local_whisper_model = None
 
     def _get_whisper_model(self):
-        """Inicializa o modelo local Faster-Whisper sob demanda."""
+        """Inicializa o modelo local Faster-Whisper sob demanda com controle estrito de threads de CPU."""
         if self._local_whisper_model is None:
             try:
+                import os
                 from faster_whisper import WhisperModel
-                self.log(f"Carregando modelo local Faster-Whisper ('{self.whisper_model_size}') na memória...")
-                # Tenta GPU CUDA; se não estiver configurado com cuDNN, cai graciosamente para CPU multithread
+                # Limita a 4 threads de CPU no máximo para deixar os outros 28 núcleos livres para a interface e SO
+                num_cpu_threads = min(4, max(1, (os.cpu_count() or 4) // 4))
+
+                self.log(f"Carregando modelo local Faster-Whisper ('{self.whisper_model_size}')...")
                 try:
-                    self._local_whisper_model = WhisperModel(self.whisper_model_size, device="cuda", compute_type="float16")
-                    self.log("Faster-Whisper rodando via aceleração por GPU (CUDA)!")
-                except Exception:
-                    self._local_whisper_model = WhisperModel(self.whisper_model_size, device="cpu", compute_type="int8")
-                    self.log("Faster-Whisper rodando via CPU local (int8 quantizado).")
+                    self._local_whisper_model = WhisperModel(
+                        self.whisper_model_size,
+                        device="cuda",
+                        compute_type="float16",
+                    )
+                    self.log("Faster-Whisper rodando via aceleração por GPU (CUDA - RTX)!")
+                except Exception as cuda_err:
+                    self.log(f"Fallback para CPU ({num_cpu_threads} threads suaves): {cuda_err}")
+                    self._local_whisper_model = WhisperModel(
+                        self.whisper_model_size,
+                        device="cpu",
+                        compute_type="int8",
+                        cpu_threads=num_cpu_threads,
+                        num_workers=1,
+                    )
             except Exception as exc:
                 self.log(f"Aviso ao carregar Faster-Whisper local: {exc}")
         return self._local_whisper_model
@@ -96,12 +106,14 @@ class AudioSpeechCleaner:
             return SpeechAnalysisResult(has_speech=True, transcription_summary="Whisper local indisponível", cuts_to_remove=[])
 
         try:
-            self.log(f"Transcrevendo localmente com Faster-Whisper: '{audio_path.name}'...")
+            self.log(f"Transcrevendo áudio com Faster-Whisper ({self.whisper_model_size}): '{audio_path.name}'...")
             segments, info = model.transcribe(
                 str(audio_path),
                 word_timestamps=True,
                 language="pt",
                 vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=400),
+                beam_size=1,  # Greedy search ultra leve (reduz uso de CPU/RAM em 80%)
             )
 
             all_words = []

@@ -95,10 +95,19 @@ with st.sidebar:
     st.subheader("🎙️ Limpeza Inteligente de Fala")
     speech_engine = st.radio(
         "Motor de Análise de Fala",
-        options=["🖥️ Local (Faster-Whisper - Offline e Seguro)", "☁️ Nuvem (Google Gemini API)"],
+        options=["🖥️ Local (Faster-Whisper - Offline e Leve)", "☁️ Nuvem (Google Gemini API)"],
         index=0,
-        help="Local: Roda 100% no seu computador sem enviar áudio para a internet e sem limites de cota. Nuvem: Usa os servidores do Google.",
+        help="Local: Roda no seu computador sem enviar áudio para a internet. Nuvem: Envia para a API do Google.",
     )
+
+    whisper_size = "tiny"
+    if "Local" in speech_engine:
+        whisper_size = st.selectbox(
+            "Tamanho do Modelo Whisper Local",
+            options=["tiny (Ultra Rápido e Leve)", "base (Balanceado)", "small (Mais Preciso)"],
+            index=0,
+            help="'tiny' usa menos de 500MB de RAM e roda quase instantaneamente sem congelar a máquina.",
+        ).split()[0]
 
     remove_silence = st.checkbox(
         "✂️ Cortar silêncios e pausas longas (Jump Cut)",
@@ -298,7 +307,12 @@ if start_btn:
 
             # Módulo 3: Detecção de Silêncio e Limpeza de Erros de Fala (Gagueira/Espirros/Repetições)
             valid_intervals_map = {}
-            speech_cleaner = AudioSpeechCleaner(api_key=api_key, model_name=model_name, log_fn=append_log)
+            speech_cleaner = AudioSpeechCleaner(
+                api_key=api_key,
+                model_name=model_name,
+                log_fn=append_log,
+                whisper_model_size=whisper_size,
+            )
 
             if remove_silence or clean_speech_mistakes:
                 progress_bar.progress(45, text="Módulo 3: Cortando silêncios e auditando erros de fala nos brutos...")

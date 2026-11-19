@@ -51,9 +51,12 @@ class FootageIndexer:
         target_avg_duration: float = 2.5,
         temp_dir: Optional[Path] = None,
         use_cache: bool = True,
+        valid_intervals_map: Optional[Dict[str, List[Tuple[float, float]]]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Varre todos os vídeos de entrada, divide em janelas candidatas, mede nitidez/iluminação/estabilidade
+        Varre todos os vídeos de entrada (respeitando a ordem fornecida),
+        divide em janelas candidatas apenas dentro dos intervalos sonoros válidos
+        (sem silêncio, sem gagueira/erros), mede nitidez/iluminação/estabilidade
         com OpenCV e classifica os melhores segmentos com Gemini Vision.
         Se já houver cache válido na pasta de entrada, reaproveita a leitura instantaneamente.
         """
@@ -63,7 +66,9 @@ class FootageIndexer:
         input_dir = video_files[0].parent
         cache_dir = input_dir / ".ai_editor_cache"
         fingerprint = self._compute_folder_fingerprint(video_files)
-        cache_file = cache_dir / f"footage_index_{fingerprint}.json"
+        # Se houver filtro de intervalos válidos, compõe a chave de cache
+        cache_suffix = f"_{len(valid_intervals_map)}" if valid_intervals_map else ""
+        cache_file = cache_dir / f"footage_index_{fingerprint}{cache_suffix}.json"
 
         if use_cache and cache_file.exists():
             try:
@@ -84,10 +89,20 @@ class FootageIndexer:
         window_sec = float(np.clip(target_avg_duration * 1.35, 1.5, 5.0))
 
         for vid_idx, video_path in enumerate(video_files):
-            self.log(f"[{vid_idx + 1}/{len(video_files)}] Analisando arquivo bruto com OpenCV: {video_path.name}")
+            self.log(f"[{vid_idx + 1}/{len(video_files)}] Analisando arquivo bruto ordenado com OpenCV: {video_path.name}")
             # Salva eventuais conversões AV1 -> H.264 no cache_dir persistente para continuar válido entre execuções
             compatible_path = ensure_opencv_compatible_video(video_path, cache_dir, log_fn=self.log)
-            segments = self._scan_video_opencv(compatible_path, window_sec=window_sec, display_name=video_path.name)
+            allowed_ranges = (
+                valid_intervals_map.get(video_path.name) or valid_intervals_map.get(str(video_path))
+                if valid_intervals_map
+                else None
+            )
+            segments = self._scan_video_opencv(
+                compatible_path,
+                window_sec=window_sec,
+                display_name=video_path.name,
+                allowed_intervals=allowed_ranges,
+            )
             all_candidates.extend(segments)
 
         if not all_candidates:
@@ -125,13 +140,20 @@ class FootageIndexer:
         self.log(f"Indexação concluída: {len(full_catalog)} trechos catalogados e ranqueados.")
         return full_catalog
 
-    def _scan_video_opencv(self, video_path: Path, window_sec: float = 2.5, display_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _scan_video_opencv(
+        self,
+        video_path: Path,
+        window_sec: float = 2.5,
+        display_name: Optional[str] = None,
+        allowed_intervals: Optional[List[Tuple[float, float]]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Divide um vídeo em segmentos e calcula:
         - Nitidez (variância do Laplaciano)
         - Exposição / Iluminação ideal (evita sub/superexposição)
         - Movimento / Estabilidade (diferença entre frames adjacentes: penaliza tremores extremos ou imagem congelada)
         - Centro de gravidade da ação (coordenada X normalizada para Smart Crop)
+        Se `allowed_intervals` for fornecido, apenas trechos contidos dentro dos intervalos são extraídos.
         """
         shown_name = display_name or video_path.name
         cap = cv2.VideoCapture(str(video_path))
@@ -149,16 +171,30 @@ class FootageIndexer:
             cap.release()
             return []
 
-        step_sec = max(1.2, window_sec * 0.85)
+        step_sec = max(1.0, window_sec * 0.85)
         segments: List[Dict[str, Any]] = []
-        cur_start = 0.0
         seg_counter = 0
 
-        while cur_start < duration:
-            cur_end = min(duration, cur_start + window_sec)
-            if cur_end - cur_start < 0.6 and cur_start > 0:
-                break
+        # Se houver intervalos permitidos de fala contínua, iteramos sobre cada bloco permitido
+        target_windows: List[Tuple[float, float]] = []
+        if allowed_intervals:
+            for int_start, int_end in allowed_intervals:
+                c_start = int_start
+                while c_start < int_end:
+                    c_end = min(int_end, c_start + window_sec)
+                    if c_end - c_start >= 0.5:
+                        target_windows.append((c_start, c_end))
+                    c_start += step_sec
+        else:
+            cur_start = 0.0
+            while cur_start < duration:
+                cur_end = min(duration, cur_start + window_sec)
+                if cur_end - cur_start < 0.6 and cur_start > 0:
+                    break
+                target_windows.append((cur_start, cur_end))
+                cur_start += step_sec
 
+        for cur_start, cur_end in target_windows:
             # Amostra 4 frames dentro da janela
             sample_times = np.linspace(cur_start + 0.05, cur_end - 0.05, num=4)
             sharpness_vals = []
@@ -250,8 +286,6 @@ class FootageIndexer:
                     }
                 )
                 seg_counter += 1
-
-            cur_start += step_sec
 
         cap.release()
         return segments

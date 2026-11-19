@@ -54,9 +54,15 @@ def check_ffmpeg_installed() -> Tuple[bool, str]:
     return True, ffmpeg_path
 
 
-def validate_input_folder(folder_path: str) -> Tuple[List[Path], List[Path]]:
+def validate_input_folder(
+    folder_path: str,
+    sort_by: str = "alphabetical",
+) -> Tuple[List[Path], List[Path]]:
     """
     Valida a pasta de entrada e retorna listas de arquivos de vídeo e de áudio encontrados.
+    Ordena os vídeos de acordo com `sort_by`:
+    - 'alphabetical': Ordem alfabética pelo nome do arquivo (ex: video_01.mp4, video_02.mp4)
+    - 'creation_time': Ordem cronológica da gravação/modificação do arquivo
     Levanta exceções claras se a pasta não existir ou estiver vazia.
     """
     if not folder_path or not folder_path.strip():
@@ -71,7 +77,7 @@ def validate_input_folder(folder_path: str) -> Tuple[List[Path], List[Path]]:
     videos: List[Path] = []
     audios: List[Path] = []
 
-    for item in sorted(path.iterdir()):
+    for item in path.iterdir():
         if item.is_file():
             ext = item.suffix.lower()
             if ext in SUPPORTED_VIDEO_EXTENSIONS:
@@ -84,6 +90,13 @@ def validate_input_folder(folder_path: str) -> Tuple[List[Path], List[Path]]:
             f"Nenhum arquivo de vídeo suportado ({', '.join(sorted(SUPPORTED_VIDEO_EXTENSIONS))}) foi encontrado em: {path}"
         )
 
+    # Ordenação conforme preferência
+    if sort_by == "creation_time":
+        videos.sort(key=lambda p: (p.stat().st_mtime, p.name.lower()))
+    else:
+        videos.sort(key=lambda p: p.name.lower())
+
+    audios.sort(key=lambda p: p.name.lower())
     return videos, audios
 
 

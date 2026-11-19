@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -10,12 +11,14 @@ import utils.config
 import core.reference_analyzer
 import core.footage_indexer
 import core.video_editor
+import core.speech_cleaner
 
 # Garante que atualizações nos módulos sejam recarregadas pelo servidor Streamlit sem precisar reiniciar o processo
 importlib.reload(utils.config)
 importlib.reload(core.reference_analyzer)
 importlib.reload(core.footage_indexer)
 importlib.reload(core.video_editor)
+importlib.reload(core.speech_cleaner)
 
 from utils.config import (
     ASPECT_RATIOS,
@@ -30,6 +33,7 @@ from utils.config import (
 from core.reference_analyzer import ReferenceAnalyzer
 from core.footage_indexer import FootageIndexer
 from core.video_editor import VideoEditor
+from core.speech_cleaner import AudioSpeechCleaner
 
 st.set_page_config(
     page_title="AI Video Style Transfer & Editor",
@@ -83,6 +87,26 @@ with st.sidebar:
         help="Caso a pasta de entrada não tenha arquivos .mp3/.wav separados, usa a trilha rítmica da referência.",
     )
 
+    st.subheader("🎙️ Limpeza Inteligente de Fala")
+    remove_silence = st.checkbox(
+        "✂️ Cortar silêncios e pausas longas (Jump Cut)",
+        value=True,
+        help="Detecta pausas na fala maiores que 0.5s e remove automaticamente.",
+    )
+
+    clean_speech_mistakes = st.checkbox(
+        "🧠 Remover erros, repetições, gagueiras e espirros (Gemini)",
+        value=True,
+        help="O Gemini analisa a fala dos vídeos para identificar frases refeitas, travamentos ou ruídos e cortá-los fora.",
+    )
+
+    order_criteria = st.selectbox(
+        "🗂️ Ordem dos Vídeos Brutos",
+        options=["Ordem Alfabética (video_01, video_02...)", "Ordem Cronológica (Data de Gravação)"],
+        index=0,
+        help="Garante que a linha do tempo respeite o encadeamento correto da sua gravação.",
+    )
+
     reuse_footage_cache = st.checkbox(
         "⚡ Reaproveitar leitura dos vídeos brutos (Cache)",
         value=True,
@@ -90,12 +114,15 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("Pipeline Modular:")
+    st.caption("Pipeline Sequencial Executado:")
     st.markdown(
-        "1. **Downloader (`yt-dlp`)**\n"
-        "2. **Estilo & Ritmo (`scenedetect` + `librosa` + `Gemini`)**\n"
-        "3. **Indexador (`OpenCV` + `Gemini Vision`)**\n"
-        "4. **Renderizador (`MoviePy` + `FFmpeg`)**"
+        "1. **Ordenar Brutos** (Alfabética ou Cronológica)\n"
+        "2. **Corte de Silêncio** (FFmpeg silencedetect)\n"
+        "3. **Filtro de Erros/Gagueira/Espirros** (Gemini Speech)\n"
+        "4. **Curadoria das Melhores Cenas** (OpenCV + Gemini Vision)\n"
+        "5. **Montagem da Timeline Sequencial**\n"
+        "6. **Tratamento de Cor & Smart Crop**\n"
+        "7. **Equalização & Loudnorm EBU R128 no Áudio Final**"
     )
 
 # Formulário Principal de Entrada
@@ -173,9 +200,10 @@ if start_btn:
         api_key = get_gemini_api_key(api_key_input)
         model_name = get_gemini_model(model_choice)
 
-        video_files, audio_files = validate_input_folder(input_folder)
+        sort_by = "creation_time" if "Cronológica" in order_criteria else "alphabetical"
+        video_files, audio_files = validate_input_folder(input_folder, sort_by=sort_by)
         out_dir = ensure_output_folder(output_folder)
-        append_log(f"Pasta de entrada validada: {len(video_files)} vídeo(s) e {len(audio_files)} áudio(s) encontrados.")
+        append_log(f"Pasta de entrada validada: {len(video_files)} vídeo(s) ordenados por {sort_by}.")
 
         if not reference_url or not reference_url.strip():
             raise ValueError("Informe a URL (ou caminho local) do vídeo de referência.")
@@ -189,7 +217,7 @@ if start_btn:
             ref_video_path = analyzer.download_reference_video(reference_url.strip(), temp_dir)
 
             # Módulo 2: Análise de Estilo da Referência (PySceneDetect + Librosa + Gemini)
-            progress_bar.progress(40, text="Módulo 2/4: Extraindo cortes, BPM e gerando Blueprint de Edição com Gemini...")
+            progress_bar.progress(30, text="Módulo 2: Extraindo cortes, BPM e gerando Blueprint de Edição com Gemini...")
             blueprint = analyzer.generate_editing_blueprint(ref_video_path, temp_dir)
             st.session_state.blueprint = blueprint
 
@@ -198,8 +226,57 @@ if start_btn:
             blueprint_path.write_text(json.dumps(blueprint, indent=2, ensure_ascii=False), encoding="utf-8")
             append_log(f"Blueprint de Edição salvo em: {blueprint_path}")
 
-            # Módulo 3: Indexação dos Arquivos Brutos (OpenCV + Gemini Vision)
-            progress_bar.progress(65, text="Módulo 3/4: Carregando/analisando vídeos brutos (OpenCV + Gemini Vision)...")
+            # Módulo 3: Detecção de Silêncio e Limpeza de Erros de Fala (Gagueira/Espirros/Repetições)
+            valid_intervals_map = {}
+            speech_cleaner = AudioSpeechCleaner(api_key=api_key, model_name=model_name, log_fn=append_log)
+
+            if remove_silence or clean_speech_mistakes:
+                progress_bar.progress(45, text="Módulo 3: Cortando silêncios e auditando erros de fala nos brutos...")
+                for vid in video_files:
+                    append_log(f"Processando áudio e fala de: {vid.name}")
+                    # Extrai áudio temporário em MP3 para análise
+                    temp_audio = temp_dir / f"{vid.stem}_audio.mp3"
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", str(vid), "-vn", "-ac", "1", "-ar", "24000", "-b:a", "96k", str(temp_audio)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+
+                    # Obtém duração total com ffprobe
+                    dur_cmd = [
+                        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1", str(vid)
+                    ]
+                    dur_res = subprocess.run(dur_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                    try:
+                        v_duration = float(dur_res.stdout.strip())
+                    except Exception:
+                        v_duration = 60.0
+
+                    # 1. Cortar silêncio
+                    if remove_silence:
+                        silences = speech_cleaner.detect_silence_intervals(vid, noise_threshold_db=-32.0, min_silence_duration=0.5)
+                        intervals = speech_cleaner.extract_clean_voice_intervals(v_duration, silences)
+                        append_log(f"  -> {len(silences)} silêncios removidos. {len(intervals)} trechos com som/fala identificados.")
+                    else:
+                        intervals = [(0.0, v_duration)]
+
+                    # 2. Auditar erros, repetições, gagueiras e espirros com Gemini
+                    if clean_speech_mistakes and temp_audio.exists():
+                        speech_res = speech_cleaner.analyze_speech_mistakes_with_gemini(temp_audio)
+                        if speech_res.cuts_to_remove:
+                            append_log(f"  -> Gemini identificou {len(speech_res.cuts_to_remove)} imperfeições para remover:")
+                            rem_list = []
+                            for err in speech_res.cuts_to_remove:
+                                append_log(f"     ✂️ [{err.error_type}] {err.start_sec}s-{err.end_sec}s: {err.reason}")
+                                rem_list.append((err.start_sec, err.end_sec))
+                            intervals = speech_cleaner.subtract_intervals(intervals, rem_list)
+                            append_log(f"  -> Intervalos válidos após limpeza de fala: {len(intervals)} bloco(s)")
+
+                    valid_intervals_map[vid.name] = intervals
+
+            # Módulo 4: Indexação e Curadoria das Melhores Cenas (OpenCV + Gemini Vision)
+            progress_bar.progress(65, text="Módulo 4: Analisando as melhores cenas nos trechos limpos...")
             indexer = FootageIndexer(api_key=api_key, model_name=model_name, log_fn=append_log)
             avg_dur = float(blueprint.get("avg_shot_duration", 2.2))
             indexed_segments = indexer.index_footage_folder(
@@ -207,11 +284,12 @@ if start_btn:
                 target_avg_duration=avg_dur,
                 temp_dir=temp_dir,
                 use_cache=reuse_footage_cache,
+                valid_intervals_map=valid_intervals_map if valid_intervals_map else None,
             )
             st.session_state.indexed_segments = indexed_segments
 
-            # Módulo 4: Montagem e Renderização (MoviePy + FFmpeg)
-            progress_bar.progress(85, text="Módulo 4/4: Montando timeline, aplicando cor/cortes e renderizando MP4 final...")
+            # Módulo 5: Montagem, Efeitos de Cor e Equalização de Áudio (MoviePy + FFmpeg)
+            progress_bar.progress(85, text="Módulo 5: Montando timeline, aplicando cor/cortes e equalizando áudio final...")
             editor = VideoEditor(log_fn=append_log)
             final_video_path = editor.render_edited_video(
                 blueprint=blueprint,

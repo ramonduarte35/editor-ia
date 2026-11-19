@@ -421,8 +421,14 @@ class VideoEditor:
         return np.array(canvas)
 
     def _normalize_audio_ffmpeg(self, input_mp4: Path, output_mp4: Path) -> None:
-        """Normaliza o áudio do vídeo renderizado usando o filtro `loudnorm` do FFmpeg."""
+        """
+        Aplica equalização de voz e normalização EBU R128 via FFmpeg:
+        - highpass=f=80: corta frequências subsônicas/estrondos e vibrações de mesa
+        - equalizer=f=3000:t=q:w=1.5:g=2.0: leve realce de clareza e inteligibilidade na voz
+        - loudnorm=I=-16:TP=-1.5:LRA=11: normalização de loudness padrão para plataformas digitais
+        """
         try:
+            audio_filter = "highpass=f=80,equalizer=f=3000:t=q:w=1.5:g=2.0,loudnorm=I=-16:TP=-1.5:LRA=11"
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -431,7 +437,7 @@ class VideoEditor:
                 "-c:v",
                 "copy",
                 "-af",
-                "loudnorm=I=-16:TP=-1.5:LRA=11",
+                audio_filter,
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -440,7 +446,7 @@ class VideoEditor:
             ]
             res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if res.returncode != 0 or not output_mp4.exists():
-                # Se o vídeo não possuir trilha de áudio, apenas move o arquivo renderizado
+                # Se falhar ou não tiver áudio, apenas copia o arquivo original renderizado
                 input_mp4.replace(output_mp4)
         except Exception:
             if input_mp4.exists():

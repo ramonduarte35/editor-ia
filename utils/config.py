@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, Tuple, List, Optional, Callable
@@ -98,6 +99,82 @@ def validate_input_folder(
 
     audios.sort(key=lambda p: p.name.lower())
     return videos, audios
+
+
+def open_os_folder_dialog(title: str = "Selecione a Pasta") -> Optional[str]:
+    """
+    Abre o explorador nativo do Sistema Operacional (Finder no Mac, Zenity/KDialog no Linux, PowerShell no Windows)
+    para o usuário selecionar uma pasta com 1 clique.
+    """
+    selected_path: Optional[str] = None
+
+    # 1. macOS (AppleScript / Finder nativo)
+    if sys.platform == "darwin":
+        try:
+            scpt = f'POSIX path of (choose folder with prompt "{title}")'
+            proc = subprocess.run(["osascript", "-e", scpt], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except Exception:
+            pass
+
+    # 2. Linux (Zenity / KDialog nativos do GNOME/KDE)
+    elif sys.platform.startswith("linux"):
+        if shutil.which("zenity"):
+            try:
+                proc = subprocess.run(
+                    ["zenity", "--file-selection", "--directory", f"--title={title}"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout.strip()
+            except Exception:
+                pass
+        elif shutil.which("kdialog"):
+            try:
+                proc = subprocess.run(
+                    ["kdialog", "--getexistingdirectory", "--title", title],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout.strip()
+            except Exception:
+                pass
+
+    # 3. Windows (FolderBrowserDialog nativo do Windows Forms via PowerShell)
+    elif sys.platform.startswith("win"):
+        try:
+            ps_script = (
+                "[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; "
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                f"$f.Description = '{title}'; "
+                "if($f.ShowDialog() -eq 'OK'){ Write-Host $f.SelectedPath }"
+            )
+            proc = subprocess.run(["powershell", "-Command", ps_script], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except Exception:
+            pass
+
+    # 4. Fallback genérico Tkinter se disponível
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title=title)
+        root.destroy()
+        if path:
+            return path
+    except Exception:
+        pass
+
+    return selected_path
 
 
 def ensure_output_folder(folder_path: str) -> Path:

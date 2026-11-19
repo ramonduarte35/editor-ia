@@ -28,6 +28,7 @@ from utils.config import (
     ensure_output_folder,
     get_gemini_api_key,
     get_gemini_model,
+    open_os_folder_dialog,
     validate_input_folder,
 )
 from core.reference_analyzer import ReferenceAnalyzer
@@ -48,6 +49,10 @@ st.markdown(
 )
 
 # Inicialização de estados de sessão
+if "input_folder_path" not in st.session_state:
+    st.session_state.input_folder_path = ""
+if "output_folder_path" not in st.session_state:
+    st.session_state.output_folder_path = ""
 if "logs" not in st.session_state:
     st.session_state.logs = []
 if "blueprint" not in st.session_state:
@@ -130,11 +135,25 @@ col_left, col_right = st.columns([3, 2])
 
 with col_left:
     st.subheader("📂 Fontes e Destino")
-    input_folder = st.text_input(
-        "Pasta de Entrada (Vídeos/Áudios Brutos)",
-        placeholder="/caminho/para/meus_videos_brutos",
-        help="Pasta contendo arquivos .mp4, .mov, .mkv, .avi e opcionalmente uma trilha .mp3/.wav.",
-    )
+
+    # Seleção da Pasta de Entrada com Explorador do SO
+    st.markdown("**Pasta de Entrada (Vídeos/Áudios Brutos)**")
+    inp_col1, inp_col2 = st.columns([4, 1])
+    with inp_col1:
+        input_folder = st.text_input(
+            "Caminho da Pasta de Entrada",
+            value=st.session_state.input_folder_path,
+            placeholder="/caminho/para/meus_videos_brutos",
+            help="Pasta contendo arquivos .mp4, .mov, .mkv, .avi e opcionalmente uma trilha .mp3/.wav.",
+            label_visibility="collapsed",
+        )
+        st.session_state.input_folder_path = input_folder
+    with inp_col2:
+        if st.button("📁 Procurar...", key="btn_browse_input", use_container_width=True, help="Abre o explorador de arquivos do sistema operacional para selecionar a pasta"):
+            chosen_dir = open_os_folder_dialog(title="Selecione a Pasta de Vídeos Brutos")
+            if chosen_dir:
+                st.session_state.input_folder_path = chosen_dir
+                st.rerun()
 
     reference_url = st.text_input(
         "URL do Vídeo de Referência (YouTube / Reels / TikTok ou caminho local)",
@@ -142,11 +161,24 @@ with col_left:
         help="Link público do vídeo cujo ritmo de cortes e estética visual serão copiados.",
     )
 
-    output_folder = st.text_input(
-        "Pasta de Saída (Destino do Vídeo Editado)",
-        placeholder="/caminho/para/videos_editados",
-        help="Pasta onde o arquivo MP4 renderizado e o JSON do Blueprint serão salvos.",
-    )
+    # Seleção da Pasta de Saída com Explorador do SO
+    st.markdown("**Pasta de Saída (Destino do Vídeo Editado)**")
+    out_col1, out_col2 = st.columns([4, 1])
+    with out_col1:
+        output_folder = st.text_input(
+            "Caminho da Pasta de Saída",
+            value=st.session_state.output_folder_path,
+            placeholder="/caminho/para/videos_editados",
+            help="Pasta onde o arquivo MP4 renderizado e o JSON do Blueprint serão salvos.",
+            label_visibility="collapsed",
+        )
+        st.session_state.output_folder_path = output_folder
+    with out_col2:
+        if st.button("📁 Procurar...", key="btn_browse_output", use_container_width=True, help="Abre o explorador de arquivos do sistema operacional para selecionar a pasta de destino"):
+            chosen_dir = open_os_folder_dialog(title="Selecione a Pasta de Saída")
+            if chosen_dir:
+                st.session_state.output_folder_path = chosen_dir
+                st.rerun()
 
 with col_right:
     st.subheader("🎞️ Parâmetros de Exportação")

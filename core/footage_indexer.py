@@ -1,7 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Tuple, Any
 import cv2
 import numpy as np
 from PIL import Image

@@ -93,6 +93,13 @@ with st.sidebar:
     )
 
     st.subheader("🎙️ Limpeza Inteligente de Fala")
+    speech_engine = st.radio(
+        "Motor de Análise de Fala",
+        options=["🖥️ Local (Faster-Whisper - Offline e Seguro)", "☁️ Nuvem (Google Gemini API)"],
+        index=0,
+        help="Local: Roda 100% no seu computador sem enviar áudio para a internet e sem limites de cota. Nuvem: Usa os servidores do Google.",
+    )
+
     remove_silence = st.checkbox(
         "✂️ Cortar silêncios e pausas longas (Jump Cut)",
         value=True,
@@ -100,9 +107,9 @@ with st.sidebar:
     )
 
     clean_speech_mistakes = st.checkbox(
-        "🧠 Remover erros, repetições, gagueiras e espirros (Gemini)",
+        "🧠 Remover erros, repetições e gagueiras",
         value=True,
-        help="O Gemini analisa a fala dos vídeos para identificar frases refeitas, travamentos ou ruídos e cortá-los fora.",
+        help="Analisa as palavras faladas para identificar frases refeitas e travamentos e cortá-los fora.",
     )
 
     order_criteria = st.selectbox(
@@ -324,11 +331,17 @@ if start_btn:
                     else:
                         intervals = [(0.0, v_duration)]
 
-                    # 2. Auditar erros, repetições, gagueiras e espirros com Gemini
+                    # 2. Auditar erros, repetições e gagueiras (Local Faster-Whisper ou Gemini)
                     if clean_speech_mistakes and temp_audio.exists():
-                        speech_res = speech_cleaner.analyze_speech_mistakes_with_gemini(temp_audio)
+                        is_local = "Local" in speech_engine
+                        if is_local:
+                            speech_res = speech_cleaner.analyze_speech_mistakes_local(temp_audio)
+                        else:
+                            speech_res = speech_cleaner.analyze_speech_mistakes_with_gemini(temp_audio)
+
                         if speech_res.cuts_to_remove:
-                            append_log(f"  -> Gemini identificou {len(speech_res.cuts_to_remove)} imperfeições para remover:")
+                            engine_label = "Faster-Whisper Local" if is_local else "Gemini"
+                            append_log(f"  -> {engine_label} identificou {len(speech_res.cuts_to_remove)} imperfeições para remover:")
                             rem_list = []
                             for err in speech_res.cuts_to_remove:
                                 append_log(f"     ✂️ [{err.error_type}] {err.start_sec}s-{err.end_sec}s: {err.reason}")

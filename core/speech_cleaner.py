@@ -44,11 +44,119 @@ class AudioSpeechCleaner:
         api_key: Optional[str] = None,
         model_name: str = "gemini-3.8-flash",
         log_fn: Optional[Callable[[str], None]] = None,
+        whisper_model_size: str = "base",
     ):
         self.api_key = api_key
         self.model_name = model_name
         self.log = log_fn or (lambda msg: None)
         self.client = genai.Client(api_key=api_key) if api_key else None
+        self.whisper_model_size = whisper_model_size
+        self._local_whisper_model = None
+
+    def _get_whisper_model(self):
+        """Inicializa o modelo local Faster-Whisper sob demanda."""
+        if self._local_whisper_model is None:
+            try:
+                from faster_whisper import WhisperModel
+                self.log(f"Carregando modelo local Faster-Whisper ('{self.whisper_model_size}') na memória...")
+                # Tenta GPU CUDA; se não estiver configurado com cuDNN, cai graciosamente para CPU multithread
+                try:
+                    self._local_whisper_model = WhisperModel(self.whisper_model_size, device="cuda", compute_type="float16")
+                    self.log("Faster-Whisper rodando via aceleração por GPU (CUDA)!")
+                except Exception:
+                    self._local_whisper_model = WhisperModel(self.whisper_model_size, device="cpu", compute_type="int8")
+                    self.log("Faster-Whisper rodando via CPU local (int8 quantizado).")
+            except Exception as exc:
+                self.log(f"Aviso ao carregar Faster-Whisper local: {exc}")
+        return self._local_whisper_model
+
+    def analyze_speech_mistakes_local(self, audio_path: Path) -> SpeechAnalysisResult:
+        """
+        Transcreve o áudio 100% OFFLINE com Faster-Whisper e detecta gagueiras
+        e repetições de frases utilizando alinhamento temporal por palavra.
+        """
+        model = self._get_whisper_model()
+        if model is None:
+            return SpeechAnalysisResult(has_speech=True, transcription_summary="Whisper local indisponível", cuts_to_remove=[])
+
+        try:
+            self.log(f"Transcrevendo localmente com Faster-Whisper: '{audio_path.name}'...")
+            segments, info = model.transcribe(
+                str(audio_path),
+                word_timestamps=True,
+                language="pt",
+                vad_filter=True,
+            )
+
+            all_words = []
+            full_text_parts = []
+            for segment in segments:
+                full_text_parts.append(segment.text)
+                if segment.words:
+                    for w in segment.words:
+                        clean_w = re.sub(r"[^\wáéíóúâêîôûãõç]", "", w.word.lower().strip())
+                        if clean_w:
+                            all_words.append({
+                                "word": clean_w,
+                                "raw": w.word,
+                                "start": round(w.start, 2),
+                                "end": round(w.end, 2),
+                            })
+
+            cuts_to_remove: List[SpeechCorrection] = []
+
+            # 1. Detecção de Gagueira / Palavras Imediatamente Repetidas
+            # Exemplo: "eu eu vou" -> remove o primeiro "eu"
+            i = 0
+            while i < len(all_words) - 1:
+                cur = all_words[i]
+                nxt = all_words[i + 1]
+                if cur["word"] == nxt["word"] and (nxt["start"] - cur["end"]) < 1.0:
+                    cuts_to_remove.append(
+                        SpeechCorrection(
+                            error_type="gagueira",
+                            start_sec=cur["start"],
+                            end_sec=cur["end"] + 0.05,
+                            reason=f"Gagueira: palavra repetida '{cur['word']}'",
+                        )
+                    )
+                    i += 1
+                i += 1
+
+            # 2. Detecção de Falsas Partidas / Frases Repetidas (n-gramas)
+            # Exemplo: "nós vamos fazer [pausa] nós vamos fazer agora..." -> descarta a primeira tentativa
+            n = 3
+            if len(all_words) >= n * 2:
+                for idx in range(len(all_words) - (n * 2) + 1):
+                    seq1 = [w["word"] for w in all_words[idx : idx + n]]
+                    # Procura se a mesma sequência de 3 palavras é reiniciada logo em seguida (em até 8 segundos)
+                    for ahead in range(idx + n, min(len(all_words) - n + 1, idx + n + 12)):
+                        seq2 = [w["word"] for w in all_words[ahead : ahead + n]]
+                        if seq1 == seq2:
+                            err_start = all_words[idx]["start"]
+                            err_end = all_words[ahead - 1]["end"] + 0.1
+                            if err_end - err_start >= 0.5:
+                                cuts_to_remove.append(
+                                    SpeechCorrection(
+                                        error_type="repeticao",
+                                        start_sec=err_start,
+                                        end_sec=err_end,
+                                        reason=f"Take refeito: repetiu a frase '{' '.join(seq1)}'",
+                                    )
+                                )
+                            break
+
+            summary = " ".join(full_text_parts)[:150]
+            self.log(f"Transcrição local concluída: {len(all_words)} palavras detectadas, {len(cuts_to_remove)} imperfeições identificadas.")
+            return SpeechAnalysisResult(
+                has_speech=len(all_words) > 0,
+                transcription_summary=summary,
+                cuts_to_remove=cuts_to_remove,
+            )
+        except Exception as exc:
+            self.log(f"Aviso na análise local Faster-Whisper: {exc}")
+            return SpeechAnalysisResult(has_speech=True, transcription_summary="Erro no Whisper", cuts_to_remove=[])
+
 
     def detect_silence_intervals(
         self,

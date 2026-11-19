@@ -81,9 +81,9 @@ with st.sidebar:
 
     model_choice = st.selectbox(
         "🤖 Modelo Gemini",
-        options=["gemini-2.5-flash", "gemini-2.5-pro"],
+        options=["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-pro"],
         index=0,
-        help="gemini-2.5-flash é mais rápido; gemini-2.5-pro oferece raciocínio multimodal mais profundo.",
+        help="gemini-3.8-flash é a versão mais moderna e rápida com suporte multimodal avançado.",
     )
 
     use_ref_audio = st.checkbox(
@@ -156,9 +156,9 @@ with col_left:
                 st.rerun()
 
     reference_url = st.text_input(
-        "URL do Vídeo de Referência (YouTube / Reels / TikTok ou caminho local)",
-        placeholder="https://www.youtube.com/shorts/...",
-        help="Link público do vídeo cujo ritmo de cortes e estética visual serão copiados.",
+        "URL do Vídeo de Referência (Opcional - YouTube / Reels / TikTok ou arquivo)",
+        placeholder="https://www.youtube.com/shorts/... (ou deixe em branco para edição sequencial de fala)",
+        help="Opcional! Se informado, o ritmo musical e cortes serão copiados dessa referência. Se vazio, o editor monta o vídeo contínuo focado na sua fala e narrativa.",
     )
 
     # Seleção da Pasta de Saída com Explorador do SO
@@ -237,20 +237,51 @@ if start_btn:
         out_dir = ensure_output_folder(output_folder)
         append_log(f"Pasta de entrada validada: {len(video_files)} vídeo(s) ordenados por {sort_by}.")
 
-        if not reference_url or not reference_url.strip():
-            raise ValueError("Informe a URL (ou caminho local) do vídeo de referência.")
+        has_ref = bool(reference_url and reference_url.strip())
+        if not has_ref:
+            append_log("Nenhum vídeo de referência informado. Ativando Modo Narrativa Contínua de Fala (Jump Cuts).")
 
         with TempWorkspace() as temp_dir:
             append_log(f"Workspace temporário criado em: {temp_dir}")
 
-            # Módulo 1: Download do Vídeo de Referência
-            progress_bar.progress(18, text="Módulo 1/4: Baixando vídeo de referência via yt-dlp...")
-            analyzer = ReferenceAnalyzer(api_key=api_key, model_name=model_name, log_fn=append_log)
-            ref_video_path = analyzer.download_reference_video(reference_url.strip(), temp_dir)
+            # Módulo 1 e 2: Vídeo de Referência (se fornecido) ou Criação de Blueprint Sequencial Automático
+            ref_video_path = None
+            if has_ref:
+                progress_bar.progress(18, text="Módulo 1/5: Baixando vídeo de referência via yt-dlp...")
+                analyzer = ReferenceAnalyzer(api_key=api_key, model_name=model_name, log_fn=append_log)
+                ref_video_path = analyzer.download_reference_video(reference_url.strip(), temp_dir)
 
-            # Módulo 2: Análise de Estilo da Referência (PySceneDetect + Librosa + Gemini)
-            progress_bar.progress(30, text="Módulo 2: Extraindo cortes, BPM e gerando Blueprint de Edição com Gemini...")
-            blueprint = analyzer.generate_editing_blueprint(ref_video_path, temp_dir)
+                progress_bar.progress(30, text="Módulo 2/5: Extraindo cortes, BPM e gerando Blueprint com Gemini...")
+                blueprint = analyzer.generate_editing_blueprint(ref_video_path, temp_dir)
+            else:
+                progress_bar.progress(25, text="Gerando Blueprint narrativo padrão para fala contínua...")
+                blueprint = {
+                    "style_summary": "Edição Contínua de Fala e Narrativa (Jump Cuts dinâmicos e cortes de silêncio/erros).",
+                    "pacing_category": "natural_speech",
+                    "bpm": 120.0,
+                    "avg_shot_duration": 3.0,
+                    "recommended_transition": "hard_cut",
+                    "crossfade_duration": 0.0,
+                    "framing_style": "dynamic_zoom",
+                    "dynamic_zoom_intensity": 0.02,
+                    "color_grading": {
+                        "preset_name": "vibrant",
+                        "saturation": 1.08,
+                        "contrast": 1.05,
+                        "brightness": 0.01,
+                        "warmth": 0.02,
+                    },
+                    "subtitle_style": {
+                        "enabled": False,
+                        "position": "bottom",
+                        "font_scale": "large",
+                        "primary_color_hex": "#FFFFFF",
+                        "stroke_color_hex": "#000000",
+                        "overlay_phrases": [],
+                    },
+                    "cut_slots": [],
+                }
+
             st.session_state.blueprint = blueprint
 
             # Salva uma cópia do Blueprint na pasta de saída para auditoria/reuso

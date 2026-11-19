@@ -41,7 +41,7 @@ def get_gemini_api_key(override_key: str = "") -> str:
 
 def get_gemini_model(override_model: str = "") -> str:
     """Retorna o modelo do Gemini configurado."""
-    return (override_model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip()
+    return (override_model or os.getenv("GEMINI_MODEL", "gemini-3.8-flash")).strip()
 
 
 def check_ffmpeg_installed() -> Tuple[bool, str]:

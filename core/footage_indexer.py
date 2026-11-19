@@ -32,7 +32,7 @@ class FootageIndexer:
     os melhores trechos com timestamps exatos.
     """
 
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash", log_fn: Optional[Callable[[str], None]] = None):
+    def __init__(self, api_key: str, model_name: str = "gemini-3.8-flash", log_fn: Optional[Callable[[str], None]] = None):
         self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
         self.log = log_fn or (lambda msg: None)

@@ -7,6 +7,19 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 
+# Compatibilidade entre PyAV >= 14/19 e faster-whisper (PyAV removeu o argumento metadata_errors em versões recentes)
+try:
+    import av
+    _orig_av_open = av.open
+
+    def _safe_av_open(*args, **kwargs):
+        kwargs.pop("metadata_errors", None)
+        return _orig_av_open(*args, **kwargs)
+
+    av.open = _safe_av_open
+except Exception:
+    pass
+
 
 class SilenceInterval(BaseModel):
     start: float
